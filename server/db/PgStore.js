@@ -41,8 +41,8 @@ export class PgStore {
       // Upsert each player; small N (max 4) so individual queries are fine
       for (const p of players) {
         await this.pool.query(
-          `INSERT INTO players (user_id, session_id, room_code, socket_id, username, avatar, color, player_index, ready, connected, left_game)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+          `INSERT INTO players (user_id, session_id, room_code, socket_id, color, player_index, ready, connected, left_game)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
            ON CONFLICT (user_id) DO UPDATE SET
              socket_id    = EXCLUDED.socket_id,
              ready        = EXCLUDED.ready,
@@ -53,8 +53,6 @@ export class PgStore {
             p.sessionId,
             roomCode,
             p.socketId,
-            p.username,
-            p.avatar,
             p.color,
             p.playerIndex,
             p.ready,
@@ -135,7 +133,9 @@ export class PgStore {
 
       for (const r of rooms) {
         const { rows: players } = await this.pool.query(
-          `SELECT * FROM players WHERE room_code = $1 ORDER BY player_index`,
+          `SELECT p.*, u.username, u.avatar
+           FROM players p JOIN users u ON u.id = p.user_id
+           WHERE p.room_code = $1 ORDER BY p.player_index`,
           [r.code],
         );
 
@@ -189,8 +189,10 @@ export class PgStore {
     if (!this.pool) return null;
     try {
       const { rows } = await this.pool.query(
-        `SELECT p.*, r.game_started, r.game_ended
-         FROM players p JOIN rooms r ON r.code = p.room_code
+        `SELECT p.*, u.username, u.avatar, r.game_started, r.game_ended
+         FROM players p
+         JOIN users u ON u.id = p.user_id
+         JOIN rooms r ON r.code = p.room_code
          WHERE p.session_id = $1 AND p.user_id = $2`,
         [sessionId, userId],
       );

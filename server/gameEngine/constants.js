@@ -29,7 +29,7 @@ export const DICE_MAX = 6;
 export const UNLOCK_NUMBER = 6;
 
 // Turn timer in seconds
-export const TURN_TIMEOUT = 15;
+export const TURN_TIMEOUT = 1;
 
 // Reconnection grace period in seconds
 export const RECONNECT_GRACE_PERIOD = 30;
