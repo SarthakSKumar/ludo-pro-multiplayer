@@ -4,32 +4,57 @@ import { persist } from "zustand/middleware";
 export const useUserStore = create(
   persist(
     (set) => ({
+      // Auth
+      token: null,
+
+      // User profile (from auth response)
+      userId: null,
       username: "",
       avatar: "",
+      firstName: "",
+      lastName: "",
+      email: "",
+      phone: "",
+
+      // Room session
       sessionId: null,
-      userId: null,
       currentRoomCode: null,
 
-      setUsername: (username) => set({ username }),
+      /** Called after login/register */
+      setAuth: ({ token, user }) =>
+        set({
+          token,
+          userId: user.id,
+          username: user.username,
+          avatar: user.avatar,
+          firstName: user.firstName,
+          lastName: user.lastName,
+          email: user.email,
+          phone: user.phone,
+        }),
 
-      setAvatar: (avatar) => set({ avatar }),
-
-      setSessionId: (sessionId) => set({ sessionId }),
-
-      setUserId: (userId) => set({ userId }),
+      logout: () =>
+        set({
+          token: null,
+          userId: null,
+          username: "",
+          avatar: "",
+          firstName: "",
+          lastName: "",
+          email: "",
+          phone: "",
+          sessionId: null,
+          currentRoomCode: null,
+        }),
 
       setCurrentRoomCode: (roomCode) => set({ currentRoomCode: roomCode }),
 
-      // Persist full session payload from server on join/create
       setSession: ({ sessionId, userId, username, roomCode }) =>
         set({ sessionId, userId, username, currentRoomCode: roomCode }),
 
       clearUser: () =>
         set({
-          username: "",
-          avatar: "",
           sessionId: null,
-          userId: null,
           currentRoomCode: null,
         }),
     }),
