@@ -1,14 +1,13 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
-import { Plus, LogIn, Users, Gamepad2, Dice1 } from "lucide-react";
+import { Plus, LogIn, Users, Gamepad2, Dice1, LogOut } from "lucide-react";
 import Button from "../components/Button";
 import Input from "../components/Input";
 import Modal from "../components/Modal";
 import { useSocketStore } from "../store/socketStore";
 import { useUserStore } from "../store/userStore";
 import { useGameStore } from "../store/gameStore";
-import { AVATARS } from "../utils/constants";
 
 const Home = () => {
   const navigate = useNavigate();
@@ -16,11 +15,12 @@ const Home = () => {
   const connected = useSocketStore((state) => state.connected);
   const waitForConnection = useSocketStore((state) => state.waitForConnection);
   const setRoom = useGameStore((state) => state.setRoom);
-  const storedUsername = useUserStore((state) => state.username);
-  const storedAvatar = useUserStore((state) => state.avatar);
+  const username = useUserStore((state) => state.username);
+  const avatar = useUserStore((state) => state.avatar);
   const currentRoomCode = useUserStore((state) => state.currentRoomCode);
-  const [username, setUsername] = useState(storedUsername);
-  const [selectedAvatar, setSelectedAvatar] = useState(storedAvatar);
+  const logout = useUserStore((state) => state.logout);
+  const disconnect = useSocketStore((state) => state.disconnect);
+
   const [roomCode, setRoomCode] = useState("");
   const [playerCount, setPlayerCount] = useState(4);
   const [error, setError] = useState("");
@@ -28,50 +28,32 @@ const Home = () => {
   const [showJoinModal, setShowJoinModal] = useState(false);
   const [loading, setLoading] = useState(false);
 
-  const setUserUsername = useUserStore((state) => state.setUsername);
-  const setUserAvatar = useUserStore((state) => state.setAvatar);
   const setUserCurrentRoomCode = useUserStore(
     (state) => state.setCurrentRoomCode,
   );
   const setUserSession = useUserStore((state) => state.setSession);
 
-  const storedSessionId = useUserStore((state) => state.sessionId);
-  const storedUserId = useUserStore((state) => state.userId);
-
-  // Handle reconnection to previous room (prefer session-based)
-  const rejoinAttempted = useRef(false);
+  // ── Mount-only rejoin to previous room ────────────────────────────────
+  // Uses [] deps so it's NOT cancelled when socket/connected state changes.
   useEffect(() => {
-    if (rejoinAttempted.current) return;
-    if (!storedSessionId || !storedUserId || !currentRoomCode) return;
+    const { currentRoomCode } = useUserStore.getState();
+    if (!currentRoomCode) return;
 
-    rejoinAttempted.current = true;
     let cancelled = false;
 
     const tryRejoin = async () => {
       try {
-        // Wait until the socket is fully connected before emitting
         await waitForConnection();
         if (cancelled) return;
 
-        const payload = {
-          sessionId: storedSessionId,
-          userId: storedUserId,
+        const response = await emit("find_my_room", {
           roomCode: currentRoomCode,
-        };
-
-        const response = await emit("find_my_room", payload);
+        });
         if (cancelled) return;
 
         if (response.success) {
           setRoom(response.room);
-          if (response.sessionId) {
-            setUserSession({
-              sessionId: response.sessionId,
-              userId: response.userId,
-              username: response.username,
-              roomCode: response.roomCode,
-            });
-          } else {
+          if (response.roomCode) {
             setUserCurrentRoomCode(response.roomCode);
           }
           if (response.room?.gameStarted && response.gameState) {
@@ -83,45 +65,28 @@ const Home = () => {
         } else {
           setUserCurrentRoomCode(null);
         }
-      } catch (err) {
+      } catch {
         setUserCurrentRoomCode(null);
       }
     };
 
     tryRejoin();
-
     return () => {
       cancelled = true;
     };
-  }, [connected, waitForConnection]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // mount-only: emit/waitForConnection are stable zustand refs
 
   const handleCreateRoom = async () => {
-    if (!username.trim()) {
-      setError("Please enter a username");
-      return;
-    }
-
-    if (username.trim().length < 3) {
-      setError("Username must be at least 3 characters");
-      return;
-    }
-
     setLoading(true);
     setError("");
 
     try {
-      const avatar =
-        selectedAvatar || AVATARS[Math.floor(Math.random() * AVATARS.length)];
+      const response = await emit("create_room", { playerCount });
 
-      const response = await emit("create_room", {
-        username: username.trim(),
-        avatar,
-        playerCount,
-      });
-
-      setUserUsername(username.trim());
-      setUserAvatar(avatar);
-      // Persist session credentials
+      if (response.roomCode) {
+        setUserCurrentRoomCode(response.roomCode);
+      }
       if (response.sessionId) {
         setUserSession({
           sessionId: response.sessionId,
@@ -129,11 +94,8 @@ const Home = () => {
           username: response.username,
           roomCode: response.roomCode,
         });
-      } else {
-        setUserCurrentRoomCode(response.roomCode);
       }
       setRoom(response.room);
-
       navigate(`/lobby/${response.roomCode}`);
     } catch (err) {
       setError(err.message || "Failed to create room");
@@ -143,11 +105,6 @@ const Home = () => {
   };
 
   const handleJoinRoom = async () => {
-    if (!username.trim()) {
-      setError("Please enter a username");
-      return;
-    }
-
     if (!roomCode.trim()) {
       setError("Please enter a room code");
       return;
@@ -162,18 +119,10 @@ const Home = () => {
     setError("");
 
     try {
-      const avatar =
-        selectedAvatar || AVATARS[Math.floor(Math.random() * AVATARS.length)];
-
       const response = await emit("join_room", {
         roomCode: roomCode.trim().toUpperCase(),
-        username: username.trim(),
-        avatar,
       });
 
-      setUserUsername(username.trim());
-      setUserAvatar(avatar);
-      // Persist session credentials
       if (response.sessionId) {
         setUserSession({
           sessionId: response.sessionId,
@@ -199,6 +148,11 @@ const Home = () => {
     }
   };
 
+  const handleLogout = () => {
+    disconnect();
+    logout();
+  };
+
   return (
     <div className="min-h-screen flex items-center justify-center p-4">
       <motion.div
@@ -220,7 +174,20 @@ const Home = () => {
           <Gamepad2 className="text-emerald-400" />
           Ludo
         </h1>
-        <p className="text-gray-400 mb-8">Play with friends online</p>
+        <p className="text-gray-400 mb-6">Play with friends online</p>
+
+        {/* User info */}
+        <div className="mb-6 flex items-center justify-center gap-3 bg-gray-800 px-4 py-3 rounded-lg border border-gray-700">
+          <span className="text-2xl">{avatar}</span>
+          <span className="text-white font-semibold">{username}</span>
+          <button
+            onClick={handleLogout}
+            className="ml-auto text-gray-400 hover:text-red-400 transition-colors"
+            title="Logout"
+          >
+            <LogOut size={18} />
+          </button>
+        </div>
 
         {/* Connection status */}
         <div className="mb-6 flex items-center justify-center gap-2">
@@ -232,23 +199,12 @@ const Home = () => {
           </span>
         </div>
 
-        {/* Username input */}
-        <div className="mb-6">
-          <Input
-            label="Your Name"
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            placeholder="Enter your name"
-            maxLength={20}
-          />
-        </div>
-
         {/* Action buttons */}
         <div className="space-y-3">
           <Button
             onClick={() => setShowCreateModal(true)}
             variant="primary"
-            disabled={!connected || username.trim().length < 3}
+            disabled={!connected}
             className="w-full flex items-center justify-center gap-2"
           >
             <Plus size={20} />
@@ -257,7 +213,7 @@ const Home = () => {
           <Button
             onClick={() => setShowJoinModal(true)}
             variant="secondary"
-            disabled={!connected || username.trim().length < 3}
+            disabled={!connected}
             className="w-full flex items-center justify-center gap-2"
           >
             <LogIn size={20} />
@@ -309,27 +265,6 @@ const Home = () => {
             </div>
           </div>
 
-          <div>
-            <label className="block text-gray-300 text-sm font-semibold mb-2">
-              Choose Avatar (Optional)
-            </label>
-            <div className="grid grid-cols-8 gap-2">
-              {AVATARS.map((avatar) => (
-                <button
-                  key={avatar}
-                  onClick={() => setSelectedAvatar(avatar)}
-                  className={`text-2xl p-1 rounded-lg transition-all ${
-                    selectedAvatar === avatar
-                      ? "bg-emerald-600 scale-110"
-                      : "bg-gray-800 hover:bg-gray-700"
-                  }`}
-                >
-                  {avatar}
-                </button>
-              ))}
-            </div>
-          </div>
-
           {error && (
             <div className="bg-red-500/20 border border-red-500 text-red-200 px-4 py-2 rounded-lg text-sm">
               {error}
@@ -366,27 +301,6 @@ const Home = () => {
             placeholder="Enter 6-digit code"
             maxLength={6}
           />
-
-          <div>
-            <label className="block text-gray-300 text-sm font-semibold mb-2">
-              Choose Avatar (Optional)
-            </label>
-            <div className="grid grid-cols-8 gap-2">
-              {AVATARS.map((avatar) => (
-                <button
-                  key={avatar}
-                  onClick={() => setSelectedAvatar(avatar)}
-                  className={`text-2xl p-1 rounded-lg transition-all ${
-                    selectedAvatar === avatar
-                      ? "bg-emerald-600 scale-110"
-                      : "bg-gray-800 hover:bg-gray-700"
-                  }`}
-                >
-                  {avatar}
-                </button>
-              ))}
-            </div>
-          </div>
 
           {error && (
             <div className="bg-red-500/20 border border-red-500 text-red-200 px-4 py-2 rounded-lg text-sm">

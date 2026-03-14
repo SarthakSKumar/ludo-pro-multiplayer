@@ -32,7 +32,6 @@ const Game = () => {
   const room = useGameStore((state) => state.room);
   const gameState = useGameStore((state) => state.gameState);
   const username = useUserStore((state) => state.username);
-  const rejoinAttempted = useRef(false);
   const diceValue = useGameStore((state) => state.diceValue);
   const isRolling = useGameStore((state) => state.isRolling);
   const chatMessages = useGameStore((state) => state.chatMessages);
@@ -54,7 +53,6 @@ const Game = () => {
 
   // ROAST #8: pull setters from hook instead of using getState() for writes
   const setCurrentRoomCode = useUserStore((state) => state.setCurrentRoomCode);
-  const setSession = useUserStore((state) => state.setSession);
 
   const selectedToken = useGameStore((state) => state.selectedToken);
   const setSelectedToken = useGameStore((state) => state.setSelectedToken);
@@ -84,54 +82,37 @@ const Game = () => {
   const currentPlayer = room?.players[gameState?.currentPlayerIndex];
   const isMyTurn = socket?.id === currentPlayer?.socketId;
 
-  // Auto-rejoin on page refresh (session-based)
-  // Reset the guard when disconnected so reconnect triggers a fresh rejoin
-  useEffect(() => {
-    if (!connected) {
-      rejoinAttempted.current = false;
-    }
-  }, [connected]);
-
-  // Rejoin on initial load (page refresh)
+  // ── Mount-only rejoin (page refresh) ────────────────────────────────────
+  // Uses [] deps so it is NOT cancelled when socket/connected state changes.
+  // waitForConnection() polls until the socket appears, then waits for connect.
   useEffect(() => {
     if (!username) {
       navigate("/");
       return;
     }
-    if (room && gameState) return;
-    if (rejoinAttempted.current) return;
+    if (room && gameState) return; // Already have data (not a refresh)
 
-    rejoinAttempted.current = true;
     let cancelled = false;
 
     const tryRejoin = async () => {
       try {
-        const { sessionId, userId, currentRoomCode } = useUserStore.getState();
-        if (!sessionId || !userId || !currentRoomCode) {
+        const { currentRoomCode } = useUserStore.getState();
+        if (!currentRoomCode) {
           navigate("/");
           return;
         }
-        // Wait for socket to be fully connected before emitting
         await waitForConnection();
         if (cancelled) return;
 
-        const payload = {
-          sessionId,
-          userId,
+        const response = await emit("find_my_room", {
           roomCode: currentRoomCode,
-        };
-        const response = await emit("find_my_room", payload);
+        });
         if (cancelled) return;
 
         if (response.success) {
           setRoom(response.room);
-          if (response.sessionId) {
-            setSession({
-              sessionId: response.sessionId,
-              userId: response.userId,
-              username: response.username,
-              roomCode: response.roomCode,
-            });
+          if (response.roomCode) {
+            setCurrentRoomCode(response.roomCode);
           }
           if (response.room?.gameStarted && response.gameState) {
             setGameState(response.gameState);
@@ -149,34 +130,22 @@ const Game = () => {
     };
 
     tryRejoin();
-
     return () => {
       cancelled = true;
     };
-  }, [
-    connected,
-    username,
-    room,
-    gameState,
-    emit,
-    waitForConnection,
-    setRoom,
-    setGameState,
-    navigate,
-  ]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // mount-only: emit/waitForConnection are stable zustand refs
 
   // Auto-rejoin after socket reconnection (mid-game disconnect recovery)
   useEffect(() => {
     if (!socket) return;
 
     const handleReconnect = async () => {
-      const { sessionId, userId, currentRoomCode } = useUserStore.getState();
-      if (!sessionId || !userId || !currentRoomCode) return;
+      const { currentRoomCode } = useUserStore.getState();
+      if (!currentRoomCode) return;
 
       try {
         const response = await emit("find_my_room", {
-          sessionId,
-          userId,
           roomCode: currentRoomCode,
         });
         if (response.success) {
