@@ -230,7 +230,6 @@ const GameBoard = ({
           }}
         >
           {content}
-          {` ${trackIdx !== undefined ? `(T${trackIdx})` : ""}${homeInfo ? `(H${homeInfo.color[0]}${homeInfo.index})` : ""}`}
           <div className="absolute inset-[1px] border-t border-l border-white/20 pointer-events-none rounded-[1px]" />
         </div>,
       );
