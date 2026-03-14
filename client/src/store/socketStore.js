@@ -9,13 +9,20 @@ export const useSocketStore = create((set, get) => ({
   connectionStatus: "disconnected", // 'connected' | 'connecting' | 'disconnected'
   error: null,
 
-  initialize: () => {
+  initialize: (token) => {
+    // Prevent double init
+    const existing = get().socket;
+    if (existing) {
+      existing.disconnect();
+    }
+
     const socket = io(SERVER_URL, {
       autoConnect: true,
       reconnection: true,
       reconnectionDelay: 1000,
       reconnectionDelayMax: 30000,
       reconnectionAttempts: Infinity,
+      auth: { token },
     });
 
     socket.on("connect", () => {
@@ -33,7 +40,7 @@ export const useSocketStore = create((set, get) => ({
     });
 
     socket.on("connect_error", (error) => {
-      console.error("Connection error:", error);
+      console.error("Connection error:", error.message);
       set({ error: error.message, connectionStatus: "connecting" });
     });
 
@@ -73,25 +80,43 @@ export const useSocketStore = create((set, get) => ({
 
   /**
    * Returns a Promise that resolves once the socket is connected.
-   * If already connected, resolves immediately.
-   * Rejects after `timeoutMs` if connection doesn't happen.
+   * Handles the case where socket is not yet initialized (polls until it appears).
    */
   waitForConnection: (timeoutMs = 10000) => {
     return new Promise((resolve, reject) => {
-      const { socket } = get();
-      if (!socket) return reject(new Error("Socket not initialized"));
-      if (socket.connected) return resolve();
+      const deadline = Date.now() + timeoutMs;
 
-      const timer = setTimeout(() => {
-        socket.off("connect", onConnect);
-        reject(new Error("Socket connection timeout"));
-      }, timeoutMs);
+      const attempt = () => {
+        if (Date.now() > deadline) {
+          return reject(new Error("Socket connection timeout"));
+        }
 
-      const onConnect = () => {
-        clearTimeout(timer);
-        resolve();
+        const { socket } = get();
+
+        if (socket?.connected) {
+          return resolve();
+        }
+
+        if (socket) {
+          // Socket exists but not yet connected — wait for connect event
+          const remaining = deadline - Date.now();
+          const timer = setTimeout(() => {
+            socket.off("connect", onConnect);
+            reject(new Error("Socket connection timeout"));
+          }, remaining);
+
+          const onConnect = () => {
+            clearTimeout(timer);
+            resolve();
+          };
+          socket.once("connect", onConnect);
+        } else {
+          // Socket not yet initialized — retry shortly
+          setTimeout(attempt, 50);
+        }
       };
-      socket.once("connect", onConnect);
+
+      attempt();
     });
   },
 

@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
 import { Copy, Check, UserMinus, LogOut } from "lucide-react";
@@ -24,115 +24,130 @@ const Lobby = () => {
   const [isReady, setIsReady] = useState(false);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
-  const rejoinAttempted = useRef(false);
 
+  // ── Effect 1: Mount-only rejoin ────────────────────────────────────────
+  // Runs once. waitForConnection() polls until the socket appears then waits
+  // for connect. Because deps are [], this effect is NOT cancelled when
+  // socket/connected zustand state changes — fixing the race condition.
   useEffect(() => {
     if (!username) {
       navigate("/");
       return;
     }
+    if (room) return; // Already have room data (e.g. just created / joined)
 
-    // Rejoin room via socket if room state is missing (e.g. page refresh)
-    // Wait for the socket to be fully connected before emitting.
-    if (!room && !rejoinAttempted.current) {
-      rejoinAttempted.current = true;
-      let cancelled = false;
+    let cancelled = false;
 
-      const rejoin = async () => {
-        try {
-          // Block until the socket connect event fires (or is already connected)
-          await waitForConnection();
-          if (cancelled) return;
+    const rejoin = async () => {
+      try {
+        await waitForConnection();
+        if (cancelled) return;
 
-          const { sessionId, userId, currentRoomCode } =
-            useUserStore.getState();
-          const payload = { username };
-          if (sessionId && userId && currentRoomCode) {
-            payload.sessionId = sessionId;
-            payload.userId = userId;
-            payload.roomCode = currentRoomCode;
+        const { currentRoomCode } = useUserStore.getState();
+        const code = currentRoomCode || roomCode;
+        if (!code) return;
+
+        const response = await emit("find_my_room", { roomCode: code });
+        if (cancelled) return;
+
+        if (response.success) {
+          setRoom(response.room);
+          const currentSocket = useSocketStore.getState().socket;
+          const me = response.room?.players?.find(
+            (p) => p.socketId === currentSocket?.id,
+          );
+          if (me?.ready) setIsReady(true);
+
+          if (response.roomCode) {
+            useUserStore.getState().setCurrentRoomCode(response.roomCode);
           }
-          const response = await emit("find_my_room", payload);
-          if (cancelled) return;
-
-          if (response.success) {
-            setRoom(response.room);
-            // Restore isReady from server state
-            const currentSocket = useSocketStore.getState().socket;
-            const me = response.room?.players?.find(
-              (p) => p.socketId === currentSocket?.id,
-            );
-            if (me?.ready) setIsReady(true);
-
-            if (response.sessionId) {
-              useUserStore.getState().setSession({
-                sessionId: response.sessionId,
-                userId: response.userId,
-                username: response.username,
-                roomCode: response.roomCode,
-              });
-            } else {
-              useUserStore.getState().setCurrentRoomCode(response.roomCode);
-            }
-            if (response.room?.gameStarted && response.gameState) {
-              useGameStore.getState().setGameState(response.gameState);
-              navigate(`/game/${response.roomCode}`);
-              return;
-            }
-          } else {
-            setError("Room not found");
-            setTimeout(() => navigate("/"), 2000);
+          if (response.room?.gameStarted && response.gameState) {
+            useGameStore.getState().setGameState(response.gameState);
+            navigate(`/game/${response.roomCode}`);
           }
-        } catch (err) {
-          console.error("Failed to rejoin room:", err);
+        } else {
+          useUserStore.getState().setCurrentRoomCode(null);
+          setError("Room not found or expired");
+          setTimeout(() => navigate("/"), 2000);
         }
-      };
-      rejoin();
-
-      return () => {
-        cancelled = true;
-      };
-    }
-
-    // The rest of this effect only makes sense when connected
-    if (!connected) return;
-
-    // Socket event handlers
-    const handlePlayerJoined = (data) => {
-      setRoom(data.room);
+      } catch (err) {
+        console.error("Failed to rejoin room:", err);
+        if (!cancelled) {
+          setError("Connection failed. Please refresh.");
+        }
+      }
     };
 
+    rejoin();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // mount-only: emit/waitForConnection are stable zustand refs
+
+  // ── Effect 2: Re-rejoin after socket.io reconnect (network blip) ───────
+  useEffect(() => {
+    if (!socket) return;
+
+    const handleReconnect = async () => {
+      const { currentRoomCode } = useUserStore.getState();
+      const code = currentRoomCode || roomCode;
+      if (!code) return;
+      try {
+        const response = await emit("find_my_room", { roomCode: code });
+        if (response.success) {
+          setRoom(response.room);
+          if (response.room?.gameStarted && response.gameState) {
+            useGameStore.getState().setGameState(response.gameState);
+            navigate(`/game/${response.roomCode}`);
+          }
+        }
+      } catch (err) {
+        console.error("Reconnect rejoin failed:", err);
+      }
+    };
+
+    socket.io.on("reconnect", handleReconnect);
+    return () => socket.io.off("reconnect", handleReconnect);
+  }, [socket, emit, setRoom, navigate, roomCode]);
+
+  // ── Effect 3: Socket event handlers (only when connected) ──────────────
+  useEffect(() => {
+    if (!connected || !socket) return;
+
+    const handlePlayerJoined = (data) => setRoom(data.room);
     const handlePlayerLeft = (data) => {
       if (data.roomDeleted) {
         setError("Room has been closed");
+        useUserStore.getState().setCurrentRoomCode(null);
+        setRoom(null);
         setTimeout(() => navigate("/"), 2000);
       } else {
         setRoom(data.room);
       }
     };
-
-    const handlePlayerReadyUpdate = (data) => {
-      setRoom(data.room);
-    };
-
+    const handlePlayerReadyUpdate = (data) => setRoom(data.room);
     const handleGameStarted = (data) => {
       setRoom(data.room || room);
       useGameStore.getState().setGameState(data.gameState);
       navigate(`/game/${roomCode}`);
     };
-
     const handlePlayerKicked = () => {
       setError("You have been kicked from the room");
       useUserStore.getState().setCurrentRoomCode(null);
       setRoom(null);
       setTimeout(() => navigate("/"), 2000);
     };
+    const handlePlayerReconnected = (data) => setRoom(data.room);
+    const handlePlayerDisconnected = (data) => setRoom(data.room);
 
     on("player_joined", handlePlayerJoined);
     on("player_left", handlePlayerLeft);
     on("player_ready_update", handlePlayerReadyUpdate);
     on("game_started", handleGameStarted);
     on("player_kicked", handlePlayerKicked);
+    on("player_reconnected", handlePlayerReconnected);
+    on("player_disconnected", handlePlayerDisconnected);
 
     return () => {
       off("player_joined", handlePlayerJoined);
@@ -140,20 +155,10 @@ const Lobby = () => {
       off("player_ready_update", handlePlayerReadyUpdate);
       off("game_started", handleGameStarted);
       off("player_kicked", handlePlayerKicked);
+      off("player_reconnected", handlePlayerReconnected);
+      off("player_disconnected", handlePlayerDisconnected);
     };
-  }, [
-    socket,
-    username,
-    connected,
-    navigate,
-    on,
-    off,
-    emit,
-    waitForConnection,
-    setRoom,
-    roomCode,
-    room,
-  ]);
+  }, [socket, connected, on, off, setRoom, navigate, roomCode, room]);
 
   const handleReady = async () => {
     try {
