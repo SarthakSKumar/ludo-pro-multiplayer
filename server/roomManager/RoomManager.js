@@ -20,6 +20,8 @@ export class RoomManager {
     this._rooms = new Map();
     /** socketId -> roomCode */
     this._playerRooms = new Map();
+    /** Callback fired when a disconnected player is removed after grace period */
+    this.onPlayerGracePeriodExpired = null;
   }
 
   /** Attach the Postgres pool after async init (called from server.js). */
@@ -130,12 +132,12 @@ export class RoomManager {
 
   // ── Room lifecycle ────────────────────────────────────────────────────────
 
-  createRoom(hostSocketId, hostData, playerCount = 4) {
+  createRoom(hostSocketId, user, playerCount = 4) {
     let roomCode = generateRoomCode();
     while (this._rooms.has(roomCode)) roomCode = generateRoomCode();
 
     const sessionId = randomUUID();
-    const userId = randomUUID();
+    const userId = user.id; // from JWT
 
     const colorOrder =
       playerCount === 2
@@ -152,8 +154,8 @@ export class RoomManager {
           socketId: hostSocketId,
           sessionId,
           userId,
-          username: hostData.username,
-          avatar: hostData.avatar,
+          username: user.username,
+          avatar: user.avatar,
           color: colorOrder[0],
           playerIndex: 0,
           ready: false,
@@ -174,7 +176,7 @@ export class RoomManager {
     this._saveRoom(roomCode);
     this.store.saveSession(sessionId, {
       userId,
-      username: hostData.username,
+      username: user.username,
       roomCode,
       playerIndex: 0,
     });
@@ -185,16 +187,24 @@ export class RoomManager {
       room: this.sanitizeRoom(room),
       sessionId,
       userId,
-      username: hostData.username,
+      username: user.username,
     };
   }
 
-  joinRoom(roomCode, socketId, userData, isRejoin = false) {
+  joinRoom(roomCode, socketId, user, isRejoin = false) {
     const room = this._rooms.get(roomCode);
     if (!room) return { success: false, error: "Room not found" };
 
     if (room.players.find((p) => p.socketId === socketId)) {
       return { success: false, error: "Already in room" };
+    }
+    // If user already in room, treat as rejoin instead of error
+    const existingPlayer = room.players.find((p) => p.userId === user.id);
+    if (existingPlayer) {
+      if (existingPlayer.left) {
+        return { success: false, error: "You already left this room" };
+      }
+      return this.rejoinByUserId(user.id, roomCode, socketId);
     }
     if (room.gameStarted) {
       return { success: false, error: "Game already started" };
@@ -204,14 +214,14 @@ export class RoomManager {
     }
 
     const sessionId = randomUUID();
-    const userId = randomUUID();
+    const userId = user.id; // from JWT
 
     const player = {
       socketId,
       sessionId,
       userId,
-      username: userData.username,
-      avatar: userData.avatar,
+      username: user.username,
+      avatar: user.avatar,
       color: room.colorOrder[room.players.length],
       playerIndex: room.players.length,
       ready: false,
@@ -225,7 +235,7 @@ export class RoomManager {
     this._saveRoom(roomCode);
     this.store.saveSession(sessionId, {
       userId,
-      username: userData.username,
+      username: user.username,
       roomCode,
       playerIndex: player.playerIndex,
     });
@@ -235,7 +245,43 @@ export class RoomManager {
       room: this.sanitizeRoom(room),
       sessionId,
       userId,
-      username: userData.username,
+      username: user.username,
+    };
+  }
+
+  rejoinByUserId(userId, roomCode, newSocketId) {
+    const room = this._rooms.get(roomCode);
+    if (!room) return { success: false, error: "Room not found" };
+
+    const player = room.players.find((p) => p.userId === userId && !p.left);
+    if (!player) return { success: false, error: "Not a member of this room" };
+
+    const oldSocketId = player.socketId;
+    player.socketId = newSocketId;
+    player.connected = true;
+
+    // Update host reference if this player was the host
+    if (room.hostId === oldSocketId) {
+      room.hostId = newSocketId;
+    }
+
+    this._playerRooms.delete(oldSocketId);
+    this._playerRooms.set(newSocketId, roomCode);
+
+    if (player.sessionId) {
+      this.sessions.updateSocket(player.sessionId, oldSocketId, newSocketId);
+    }
+
+    this._saveRoom(roomCode);
+
+    return {
+      success: true,
+      roomCode,
+      room: this.sanitizeRoom(room),
+      gameState: room.gameEngine ? room.gameEngine.getGameState() : null,
+      reconnected: true,
+      userId,
+      username: player.username,
     };
   }
 
@@ -251,6 +297,11 @@ export class RoomManager {
     const oldSocketId = player.socketId;
     player.socketId = newSocketId;
     player.connected = true;
+
+    // Update host reference if this player was the host
+    if (room.hostId === oldSocketId) {
+      room.hostId = newSocketId;
+    }
 
     this._playerRooms.delete(oldSocketId);
     this._playerRooms.set(newSocketId, roomCode);
@@ -370,6 +421,17 @@ export class RoomManager {
     if (!player) return null;
 
     player.connected = false;
+
+    // In lobby, immediately transfer host so remaining players aren't blocked
+    if (!room.gameStarted && socketId === room.hostId) {
+      const newHost = room.players.find(
+        (p) => p.connected && !p.left && p.socketId !== socketId,
+      );
+      if (newHost) {
+        room.hostId = newHost.socketId;
+      }
+    }
+
     this._saveRoom(roomCode);
 
     const sessionId = player.sessionId;
@@ -396,7 +458,12 @@ export class RoomManager {
     if (elapsed >= RECONNECT_GRACE_PERIOD * 1000) {
       const room = this._rooms.get(info.roomCode);
       const player = room?.players.find((p) => p.sessionId === sessionId);
-      if (player) this.leaveRoom(player.socketId);
+      if (player) {
+        const result = this.leaveRoom(player.socketId);
+        if (this.onPlayerGracePeriodExpired) {
+          this.onPlayerGracePeriodExpired(info.roomCode, result);
+        }
+      }
       this.sessions.clearDisconnected(sessionId);
     }
   }
