@@ -1,8 +1,4 @@
-import {
-  generateAvatar,
-  validateUsername,
-  validateRoomCode,
-} from "../utils/helpers.js";
+import { validateRoomCode } from "../utils/helpers.js";
 import {
   TURN_TIMEOUT,
   HEARTBEAT_INTERVAL_MS,
@@ -45,6 +41,20 @@ export function setupSocketHandlers(io, roomManager, redisConnection) {
     advanceTurnSkippingDisconnected,
   } = gameActions;
 
+  // ── Grace-period player removal → notify remaining players ───────────────
+  roomManager.onPlayerGracePeriodExpired = (roomCode, result) => {
+    if (!result?.success) return;
+    if (result.roomDeleted) {
+      clearRoomTimers(roomCode);
+      io.to(roomCode).emit("player_left", { roomDeleted: true });
+    } else {
+      io.to(roomCode).emit("player_left", {
+        room: result.room,
+        roomDeleted: false,
+      });
+    }
+  };
+
   // ── Player presence heartbeat ────────────────────────────────────────────
   setInterval(() => {
     for (const [roomCode, room] of roomManager.rooms) {
@@ -84,18 +94,10 @@ export function setupSocketHandlers(io, roomManager, redisConnection) {
       try {
         if (rateLimit("create_room", 3, 10000))
           return callback({ success: false, error: "Too many requests" });
-        const { username, playerCount = 4 } = data;
+        const { playerCount = 4 } = data;
+        const user = socket.user; // from JWT middleware
 
-        const validation = validateUsername(username);
-        if (!validation.valid)
-          return callback({ success: false, error: validation.error });
-
-        const userData = {
-          username: validation.username,
-          avatar: data.avatar || generateAvatar(),
-        };
-
-        const result = roomManager.createRoom(socket.id, userData, playerCount);
+        const result = roomManager.createRoom(socket.id, user, playerCount);
         if (result.success) socket.join(result.roomCode);
         callback(result);
       } catch (error) {
@@ -110,24 +112,17 @@ export function setupSocketHandlers(io, roomManager, redisConnection) {
       try {
         if (rateLimit("join_room", 5, 5000))
           return callback({ success: false, error: "Too many requests" });
-        const { roomCode, username } = data;
+        const { roomCode } = data;
 
         if (!validateRoomCode(roomCode))
           return callback({ success: false, error: "Invalid room code" });
 
-        const validation = validateUsername(username);
-        if (!validation.valid)
-          return callback({ success: false, error: validation.error });
-
-        const userData = {
-          username: validation.username,
-          avatar: data.avatar || generateAvatar(),
-        };
+        const user = socket.user; // from JWT middleware
 
         const result = roomManager.joinRoom(
           roomCode.toUpperCase(),
           socket.id,
-          userData,
+          user,
           false,
         );
 
@@ -150,18 +145,18 @@ export function setupSocketHandlers(io, roomManager, redisConnection) {
       try {
         if (rateLimit("rejoin_room", 5, 5000))
           return callback({ success: false, error: "Too many requests" });
-        const { sessionId, userId, roomCode } = data;
+        const { roomCode } = data;
+        const userId = socket.user.id;
 
-        if (!sessionId || !userId || !roomCode)
+        if (!roomCode)
           return callback({
             success: false,
-            error: "Missing session credentials",
+            error: "Missing room code",
           });
         if (!validateRoomCode(roomCode))
           return callback({ success: false, error: "Invalid room code" });
 
-        const result = roomManager.rejoinBySession(
-          sessionId,
+        const result = roomManager.rejoinByUserId(
           userId,
           roomCode.toUpperCase(),
           socket.id,
@@ -412,10 +407,10 @@ export function setupSocketHandlers(io, roomManager, redisConnection) {
     // Reconnect (legacy — kept for backward compatibility)
     socket.on("reconnect_room", (data, callback) => {
       try {
-        const { sessionId, userId, roomCode } = data;
-        if (sessionId && userId && roomCode) {
-          const result = roomManager.rejoinBySession(
-            sessionId,
+        const { roomCode } = data;
+        const userId = socket.user.id;
+        if (userId && roomCode) {
+          const result = roomManager.rejoinByUserId(
             userId,
             roomCode,
             socket.id,
@@ -460,17 +455,17 @@ export function setupSocketHandlers(io, roomManager, redisConnection) {
     // Find room by session (page refresh / rejoin)
     socket.on("find_my_room", (data, callback) => {
       try {
-        const { sessionId, userId, roomCode } = data;
-        if (!sessionId || !userId || !roomCode)
+        const { roomCode } = data;
+        const userId = socket.user.id;
+        if (!roomCode)
           return callback({
             success: false,
-            error: "Session credentials required",
+            error: "Room code required",
           });
 
-        const result = roomManager.rejoinBySession(
-          sessionId,
+        const result = roomManager.rejoinByUserId(
           userId,
-          roomCode,
+          roomCode.toUpperCase(),
           socket.id,
         );
 

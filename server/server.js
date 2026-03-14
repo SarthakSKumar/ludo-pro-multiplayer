@@ -6,9 +6,11 @@ import dotenv from "dotenv";
 import rateLimit from "express-rate-limit";
 import { createClient } from "redis";
 import { createAdapter } from "@socket.io/redis-adapter";
+import jwt from "jsonwebtoken";
 import { RoomManager } from "./roomManager/RoomManager.js";
 import { setupSocketHandlers } from "./socket/socketHandlers.js";
-import { initPgPool } from "./db/pg.js";
+import { initPgPool, getPgPool } from "./db/pg.js";
+import authRoutes from "./routes/auth.js";
 
 dotenv.config();
 
@@ -49,6 +51,9 @@ const limiter = rateLimit({
 });
 
 app.use("/api/", limiter);
+
+// Auth routes
+app.use("/api/auth", authRoutes);
 
 // Socket.IO setup
 const io = new Server(httpServer, {
@@ -133,6 +138,20 @@ const roomManager = new RoomManager(redisSessionClient);
       console.error("Failed to parse REDIS_URL for BullMQ:", e.message);
     }
   }
+
+  // JWT middleware for Socket.IO — authenticate every connection
+  const JWT_SECRET = process.env.JWT_SECRET || "ludo-secret-key-2026";
+  io.use((socket, next) => {
+    const token = socket.handshake.auth?.token;
+    if (!token) return next(new Error("Authentication required"));
+    try {
+      const payload = jwt.verify(token, JWT_SECRET);
+      socket.user = payload; // { id, username, avatar, email }
+      next();
+    } catch {
+      next(new Error("Invalid token"));
+    }
+  });
 
   // Setup socket handlers (pass BullMQ-compatible connection options)
   setupSocketHandlers(io, roomManager, bullmqConnection);
