@@ -5,7 +5,7 @@ import { LogIn, Eye, EyeOff, Gamepad2 } from "lucide-react";
 import Button from "../components/Button";
 import { useUserStore } from "../store/userStore";
 
-const SERVER_URL = import.meta.env.VITE_SERVER_URL || "http://localhost:3001";
+const SERVER_URL = import.meta.env.VITE_SERVER_URL || "http://localhost:4001";
 
 const Login = () => {
   const navigate = useNavigate();

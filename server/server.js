@@ -163,7 +163,7 @@ const roomManager = new RoomManager(redisSessionClient);
     await roomManager.restoreFromRedis();
   }
 
-  const PORT = process.env.PORT || 3001;
+  const PORT = process.env.PORT || 4001;
   httpServer.listen(PORT, () => {
     console.log(`🎮 Ludo server running on port ${PORT}`);
     console.log(`Environment: ${process.env.NODE_ENV}`);
